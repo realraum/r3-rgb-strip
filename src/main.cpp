@@ -1,9 +1,13 @@
+// non-addressable ledstrip controlled via MQTT and PWM
 #include <Arduino.h>
 
 // 3rdparty lib includes
 #include <ArduinoJson.h>
 #include <ESP8266WiFi.h>
 #include <PubSubClient.h>
+
+// local includes
+#include "typesafeenum.h"
 
 constexpr const char * const wifi_ssid = "realraum";
 constexpr const char * const wifi_pass = "r3alraum";
@@ -12,6 +16,12 @@ constexpr const char * const mqtt_id = "esp8266-rgb-ledstrip";
 constexpr const char * const mqtt_base_topic = "action/rgb-ledstrip/#";
 constexpr const char * const mqtt_status_topic = "action/rgb-ledstrip/status";
 constexpr const char * const mqtt_online_topic = "action/rgb-ledstrip/online";
+constexpr const char * const mqtt_ledstrip_modes_topic = "action/rgb-ledstrip/modes";
+constexpr const char * const mqtt_info_topic = "action/rgb-ledstrip/info";
+
+// r3 specific topics
+constexpr const char * const mqtt_realraum_w2frontdoor_topic = "realraum/w2frontdoor/lock";
+constexpr const char * const mqtt_realraum_w1frontdoor_topic = "realraum/frontdoor/lock";
 
 constexpr const uint8_t pin_red = D5;
 constexpr const uint8_t pin_green = D6;
@@ -29,7 +39,32 @@ typedef struct {
     uint8_t current_brightness;
 } ledstrip_status_t;
 
-ledstrip_status_t ledstrip_status = {0, 0, 0, 0};
+#define LEDSTRIP_MODE_VALUES(x) \
+    x(MODE_DEFAULT) \
+    x(MODE_RAINBOW) \
+    x(MODE_STROBO) \
+    x(MODE_W1DOOR) \
+    x(MODE_W2DOOR) \
+    x(_)
+DECLARE_TYPESAFE_ENUM(ledstrip_mode_t, : uint8_t, LEDSTRIP_MODE_VALUES);
+
+typedef struct {
+    uint8_t red;
+    uint8_t green;
+    uint8_t blue;
+    uint8_t brightness;
+
+    ledstrip_mode_t mode;
+} mqtt_status_t;
+
+typedef struct {
+    bool w1frontdoor_locked;
+    bool w2frontdoor_locked;
+} realraum_status_t;
+
+ledstrip_status_t ledstrip_status;
+mqtt_status_t mqtt_status;
+realraum_status_t realraum_status;
 
 WiFiClient wifiClient;
 PubSubClient mqttClient{wifiClient};
@@ -43,6 +78,16 @@ void setup_ledstrip()
     digitalWrite(pin_red, HIGH);
     digitalWrite(pin_green, HIGH);
     digitalWrite(pin_blue, HIGH);
+
+    ledstrip_status.red = 0;
+    ledstrip_status.green = 0;
+    ledstrip_status.blue = 0;
+    ledstrip_status.brightness = 255;
+
+    mqtt_status.red = 0;
+    mqtt_status.green = 0;
+    mqtt_status.blue = 0;
+    mqtt_status.mode = ledstrip_mode_t::MODE_DEFAULT;
 }
 
 void render_ledstrip(bool instant = false)
@@ -90,6 +135,214 @@ void setLedstrip(uint8_t red, uint8_t green, uint8_t blue, uint8_t brightness)
     ledstrip_status.brightness = brightness;
 }
 
+void setMQTTLedstrip(uint8_t red, uint8_t green, uint8_t blue, uint8_t brightness)
+{
+    mqtt_status.red = red;
+    mqtt_status.green = green;
+    mqtt_status.blue = blue;
+    mqtt_status.brightness = brightness;
+}
+
+void setMQTTLedstripRed(uint8_t red)
+{
+    mqtt_status.red = red;
+}
+
+void setMQTTLedstripGreen(uint8_t green)
+{
+    mqtt_status.green = green;
+}
+
+void setMQTTLedstripBlue(uint8_t blue)
+{
+    mqtt_status.blue = blue;
+}
+
+void setMQTTLedstripBrightness(uint8_t brightness)
+{
+    mqtt_status.brightness = brightness;
+}
+
+void setLedstripBrightness(uint8_t brightness)
+{
+    mqtt_status.brightness = brightness;
+    ledstrip_status.brightness = brightness;
+}
+
+void handle_rainbow()
+{
+    static uint32_t last_update = 0;
+    const uint32_t now = millis();
+
+    if (now - last_update > 50)
+    {
+        last_update = now;
+
+        static uint16_t hue = 0; // 0 - 360
+        hue += 1;
+
+        if (hue > 360)
+            hue = 0;
+
+        uint8_t red, green, blue;
+
+        if (hue < 60)
+        {
+            red = 255;
+            green = hue * 255 / 60;
+            blue = 0;
+        }
+        else if (hue < 120)
+        {
+            red = (120 - hue) * 255 / 60;
+            green = 255;
+            blue = 0;
+        }
+        else if (hue < 180)
+        {
+            red = 0;
+            green = 255;
+            blue = (hue - 120) * 255 / 60;
+        }
+        else if (hue < 240)
+        {
+            red = 0;
+            green = (240 - hue) * 255 / 60;
+            blue = 255;
+        }
+        else if (hue < 300)
+        {
+            red = (hue - 240) * 255 / 60;
+            green = 0;
+            blue = 255;
+        }
+        else
+        {
+            red = 255;
+            green = 0;
+            blue = (360 - hue) * 255 / 60;
+        }
+
+        setLedstrip(red, green, blue, ledstrip_status.brightness);
+    }
+}
+
+void handle_strobo()
+{
+    static uint32_t last_update = 0;
+    const uint32_t now = millis();
+
+    if (now - last_update > 100)
+    {
+        last_update = now;
+
+        static bool on = false;
+        on = !on;
+
+        if (on)
+            setLedstrip(255, 255, 255, ledstrip_status.brightness);
+        else
+            setLedstrip(0, 0, 0, ledstrip_status.brightness);
+    }
+}
+
+void handle_w1status()
+{
+    static uint32_t last_update = 0;
+    const uint32_t now = millis();
+
+    if (now - last_update > 100)
+    {
+        last_update = now;
+
+        if (realraum_status.w1frontdoor_locked)
+        {
+            setLedstrip(255, 0, 0, ledstrip_status.brightness); // red
+        }
+        else
+        {
+            setLedstrip(0, 255, 0, ledstrip_status.brightness); // green
+        }
+    }
+}
+
+void handle_w2status()
+{
+    static uint32_t last_update = 0;
+    const uint32_t now = millis();
+
+    if (now - last_update > 100)
+    {
+        last_update = now;
+
+        if (realraum_status.w2frontdoor_locked)
+        {
+            setLedstrip(255, 0, 0, ledstrip_status.brightness); // red
+        }
+        else
+        {
+            setLedstrip(0, 255, 0, ledstrip_status.brightness); // green
+        }
+    }
+}
+
+void handle_ledstrip()
+{
+    switch (mqtt_status.mode)
+    {
+        case ledstrip_mode_t::MODE_DEFAULT:
+        {
+            ledstrip_status.red = mqtt_status.red;
+            ledstrip_status.green = mqtt_status.green;
+            ledstrip_status.blue = mqtt_status.blue;
+            ledstrip_status.brightness = mqtt_status.brightness;
+            break;
+        }
+        case ledstrip_mode_t::MODE_RAINBOW:
+            handle_rainbow();
+            break;
+        case ledstrip_mode_t::MODE_STROBO:
+            handle_strobo();
+            break;
+        case ledstrip_mode_t::MODE_W1DOOR:
+            handle_w1status();
+            break;
+        case ledstrip_mode_t::MODE_W2DOOR:
+            handle_w2status();
+            break;
+        default:;
+    }
+}
+
+void publish_modes()
+{
+    StaticJsonDocument<256> doc;
+
+    iterateledstrip_mode_t([&](ledstrip_mode_t mode, const auto &string_value) {
+        if (mode != ledstrip_mode_t::_)
+            doc[string_value] = static_cast<uint8_t>(mode);
+    });
+
+    char buffer[256];
+    serializeJson(doc, buffer);
+
+    mqttClient.publish(mqtt_ledstrip_modes_topic, buffer);
+}
+
+void publish_info()
+{
+    StaticJsonDocument<256> doc;
+
+    doc["sha"] = GIT_HASH;
+    doc["repo"] = "https://github.com/realraum/r3-rgb-strip/";
+
+    char buffer[256];
+
+    serializeJson(doc, buffer);
+
+    mqttClient.publish(mqtt_info_topic, buffer);
+}
+
 void setup_wifi()
 {
     delay(10);
@@ -120,6 +373,18 @@ void setup_wifi()
 
 void mqtt_callback(char* topic, byte* payload, unsigned int length)
 {
+    // debug log message
+    Serial.print("Message arrived [");
+    Serial.print(topic);
+    Serial.print("] ");
+
+    for (uint8_t i = 0; i < length; i++)
+    {
+        Serial.print((char)payload[i]);
+    }
+
+    Serial.println();
+
     // json parse message
     StaticJsonDocument<128> doc;
     DeserializationError error = deserializeJson(doc, payload, length);
@@ -131,15 +396,65 @@ void mqtt_callback(char* topic, byte* payload, unsigned int length)
     }
 
     // check if message is for us
-    if (strcmp(topic, mqtt_status_topic) != 0)
-        return;
+    if (strcmp(topic, mqtt_status_topic) == 0)
+    {
+        if (doc.containsKey("r") && doc["r"].is<uint8_t>())
+        {
+            Serial.printf("mqtt: red: %d\n", doc["r"].as<uint8_t>());
+            setMQTTLedstripRed(doc["r"].as<uint8_t>());
+        }
+        if (doc.containsKey("g") && doc["g"].is<uint8_t>())
+        {
+            Serial.printf("mqtt: g: %d\n", doc["g"].as<uint8_t>());
+            setMQTTLedstripGreen(doc["g"].as<uint8_t>());
+        }
+        if (doc.containsKey("b") && doc["b"].is<uint8_t>())
+        {
+            Serial.printf("mqtt: b: %d\n", doc["b"].as<uint8_t>());
+            setMQTTLedstripBlue(doc["b"].as<uint8_t>());
+        }
+        if (doc.containsKey("br") && doc["br"].is<uint8_t>())
+        {
+            Serial.printf("mqtt: br: %d\n", doc["br"].as<uint8_t>());
+            setLedstripBrightness(doc["br"].as<uint8_t>());
+        }
+        if (doc.containsKey("mode") && doc["mode"].is<uint8_t>())
+        {
+            const uint8_t mode = doc["mode"].as<uint8_t>();
+            constexpr const uint8_t last_mode = static_cast<uint8_t>(ledstrip_mode_t::_) - 1;
 
-    // check if message is valid
-    if (!doc.containsKey("r") || !doc.containsKey("g") || !doc.containsKey("b") || !doc.containsKey("br"))
-        return;
-
-    // set ledstrip
-    setLedstrip(doc["r"], doc["g"], doc["b"], doc["br"]);
+            if (mode <= last_mode)
+            {
+                Serial.printf("mqtt: mode: %d\n", mode);
+                mqtt_status.mode = static_cast<ledstrip_mode_t>(mode);
+            }
+            else
+            {
+                Serial.printf("mqtt: mode: %d is out of range\n", mode);
+            }
+        }
+    }
+    else if (strcmp(topic, mqtt_realraum_w2frontdoor_topic) == 0)
+    {
+        if (doc.containsKey("Locked") && doc["Locked"].is<bool>())
+        {
+            Serial.printf("mqtt: w2frontdoor: %s\n", doc["Locked"].as<bool>() ? "locked" : "unlocked");
+            realraum_status.w2frontdoor_locked = doc["Locked"].as<bool>();
+        }
+    }
+    else if (strcmp(topic, mqtt_realraum_w1frontdoor_topic) == 0)
+    {
+        if (doc.containsKey("Locked") && doc["Locked"].is<bool>())
+        {
+            Serial.printf("mqtt: w1frontdoor: %s\n", doc["Locked"].as<bool>() ? "locked" : "unlocked");
+            realraum_status.w1frontdoor_locked = doc["Locked"].as<bool>();
+        }
+    }
+    else
+    {
+        Serial.print("Unknown topic: ");
+        Serial.println(topic);
+    }
 }
 
 void send_status()
@@ -155,35 +470,47 @@ void send_status()
 
 void reconnect()
 {
-  // Loop until we're reconnected
-  while (!mqttClient.connected())
-  {
-    Serial.print("Attempting MQTT connection...");
-    // Attempt to connect with will message
-
-    StaticJsonDocument<128> doc;
-	doc["ip"] = WiFi.localIP().toString();
-	doc["online"] = false;
-
-    char json[128];
-    serializeJson(doc, json);
-
-    if (mqttClient.connect(mqtt_id, mqtt_online_topic, 0, true, json))
+    // Loop until we're reconnected
+    while (!mqttClient.connected())
     {
-      Serial.println("connected");
-      mqttClient.publish("outTopic", "hello world");
-      mqttClient.subscribe(mqtt_status_topic);
-      Serial.printf("Subscribed to %s!\n", mqtt_status_topic);
-      send_status();      
+        Serial.print("Attempting MQTT connection...");
+        // Attempt to connect with will message
+
+        StaticJsonDocument<128> doc;
+        doc["ip"] = WiFi.localIP().toString();
+        doc["online"] = false;
+
+        char json[128];
+        serializeJson(doc, json);
+
+        if (mqttClient.connect(mqtt_id, mqtt_online_topic, 0, true, json))
+        {
+            Serial.println("connected");
+            mqttClient.publish("outTopic", "hello world");
+
+            publish_modes();
+            publish_info();
+
+            // subscribe
+            mqttClient.subscribe(mqtt_status_topic);
+            Serial.printf("Subscribed to %s!\n", mqtt_status_topic);
+
+            mqttClient.subscribe(mqtt_realraum_w1frontdoor_topic);
+            Serial.printf("Subscribed to %s!\n", mqtt_realraum_w1frontdoor_topic);
+
+            mqttClient.subscribe(mqtt_realraum_w2frontdoor_topic);
+            Serial.printf("Subscribed to %s!\n", mqtt_realraum_w2frontdoor_topic);
+
+            send_status();      
+        }
+        else
+        {
+            Serial.print("failed, rc=");
+            Serial.print(mqttClient.state());
+            Serial.println(" try again in 5 seconds");
+            delay(5000);
+        }
     }
-    else
-    {
-      Serial.print("failed, rc=");
-      Serial.print(mqttClient.state());
-      Serial.println(" try again in 5 seconds");
-      delay(5000);
-    }
-  }
 }
 
 void setup()
@@ -206,17 +533,24 @@ void setup()
 
 void loop()
 {
+    bool instant = false;
+
     if (!mqttClient.connected())
     {
         reconnect();
     }
     mqttClient.loop();
 
+    handle_ledstrip();
+
+    if (mqtt_status.mode == ledstrip_mode_t::MODE_STROBO)
+        instant = true;
+
     static uint32_t last_millis_render = 0;
     if (millis() - last_millis_render > 1)
     {
         last_millis_render = millis();
-        render_ledstrip();
+        render_ledstrip(instant);
     }
 
     delay(1);
