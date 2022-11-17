@@ -12,12 +12,13 @@
 constexpr const char * const wifi_ssid = "realraum";
 constexpr const char * const wifi_pass = "r3alraum";
 constexpr const char * const mqtt_url = "mqtt.realraum.at";
-constexpr const char * const mqtt_id = "esp8266-rgb-ledstrip";
-constexpr const char * const mqtt_base_topic = "action/rgb-ledstrip/#";
-constexpr const char * const mqtt_status_topic = "action/rgb-ledstrip/status";
-constexpr const char * const mqtt_online_topic = "action/rgb-ledstrip/online";
-constexpr const char * const mqtt_ledstrip_modes_topic = "action/rgb-ledstrip/modes";
-constexpr const char * const mqtt_info_topic = "action/rgb-ledstrip/info";
+constexpr const char * const mqtt_id = "esp8266-ducttape-ledstrip";
+constexpr const char * const mqtt_base_topic = "action/ducttape-ledstrip/#";
+constexpr const char * const mqtt_status_topic = "action/ducttape-ledstrip/status";
+constexpr const char * const mqtt_light_topic = "action/ducttape-ledstrip/light";
+constexpr const char * const mqtt_online_topic = "action/ducttape-ledstrip/online";
+constexpr const char * const mqtt_ledstrip_modes_topic = "action/ducttape-ledstrip/modes";
+constexpr const char * const mqtt_info_topic = "action/ducttape-ledstrip/info";
 
 // r3 specific topics
 constexpr const char * const mqtt_realraum_w2frontdoor_topic = "realraum/w2frontdoor/lock";
@@ -398,6 +399,7 @@ void mqtt_callback(char* topic, byte* payload, unsigned int length)
     // check if message is for us
     if (strcmp(topic, mqtt_status_topic) == 0)
     {
+        return; // disable for now, later add only brightness and mode and ignore brightness on mode 0
         if (doc.containsKey("r") && doc["r"].is<uint8_t>())
         {
             Serial.printf("mqtt: red: %d\n", doc["r"].as<uint8_t>());
@@ -433,6 +435,29 @@ void mqtt_callback(char* topic, byte* payload, unsigned int length)
                 Serial.printf("mqtt: mode: %d is out of range\n", mode);
             }
         }
+    }
+    else if (strcmp(topic, mqtt_light_topic) == 0) // {r:1000,g:1000,b:0} => convert 0-1000 to 0-255, also set brightness to 255 and mode to 0
+    {
+        if (doc.containsKey("r") && doc["r"].is<uint16_t>())
+        {
+            const auto value = doc["r"].as<uint16_t>() * 255 / 1000;
+            Serial.printf("mqtt: red: %d (%d * 255 / 1000)\n", value, doc["r"].as<uint16_t>());
+            setMQTTLedstripRed(value);
+        }
+        if (doc.containsKey("g") && doc["g"].is<uint16_t>())
+        {
+            const auto value = doc["g"].as<uint16_t>() * 255 / 1000;
+            Serial.printf("mqtt: g: %d (%d * 255 / 1000)\n", value, doc["g"].as<uint16_t>());
+            setMQTTLedstripGreen(value);
+        }
+        if (doc.containsKey("b") && doc["b"].is<uint16_t>())
+        {
+            const auto value = doc["b"].as<uint16_t>() * 255 / 1000;
+            Serial.printf("mqtt: b: %d (%d * 255 / 1000)\n", value, doc["b"].as<uint16_t>());
+            setMQTTLedstripBlue(value);
+        }
+        setLedstripBrightness(255);
+        mqtt_status.mode = ledstrip_mode_t::MODE_DEFAULT;
     }
     else if (strcmp(topic, mqtt_realraum_w2frontdoor_topic) == 0)
     {
@@ -494,6 +519,9 @@ void reconnect()
             // subscribe
             mqttClient.subscribe(mqtt_status_topic);
             Serial.printf("Subscribed to %s!\n", mqtt_status_topic);
+
+            mqttClient.subscribe(mqtt_light_topic);
+            Serial.printf("Subscribed to %s!\n", mqtt_light_topic);
 
             mqttClient.subscribe(mqtt_realraum_w1frontdoor_topic);
             Serial.printf("Subscribed to %s!\n", mqtt_realraum_w1frontdoor_topic);
