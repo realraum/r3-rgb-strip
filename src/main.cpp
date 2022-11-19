@@ -399,22 +399,6 @@ void mqtt_callback(char* topic, byte* payload, unsigned int length)
     // check if message is for us
     if (strcmp(topic, mqtt_status_topic) == 0)
     {
-        return; // disable for now, later add only brightness and mode and ignore brightness on mode 0
-        if (doc.containsKey("r") && doc["r"].is<uint8_t>())
-        {
-            Serial.printf("mqtt: red: %d\n", doc["r"].as<uint8_t>());
-            setMQTTLedstripRed(doc["r"].as<uint8_t>());
-        }
-        if (doc.containsKey("g") && doc["g"].is<uint8_t>())
-        {
-            Serial.printf("mqtt: g: %d\n", doc["g"].as<uint8_t>());
-            setMQTTLedstripGreen(doc["g"].as<uint8_t>());
-        }
-        if (doc.containsKey("b") && doc["b"].is<uint8_t>())
-        {
-            Serial.printf("mqtt: b: %d\n", doc["b"].as<uint8_t>());
-            setMQTTLedstripBlue(doc["b"].as<uint8_t>());
-        }
         if (doc.containsKey("br") && doc["br"].is<uint8_t>())
         {
             Serial.printf("mqtt: br: %d\n", doc["br"].as<uint8_t>());
