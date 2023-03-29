@@ -565,5 +565,14 @@ void loop()
         render_ledstrip(instant);
     }
 
+    static uint32_t last_info_push = 0;
+    if (millis() - last_info_push > 5000)
+    {
+        last_info_push = millis();
+        publish_modes();
+        publish_info();
+        send_status();
+    }
+
     delay(1);
 }
